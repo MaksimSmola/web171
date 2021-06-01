@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>DRM</title>
+    <script type="text/javascript" src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+    <script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/shaka-player/2.5.6/shaka-player.compiled.debug.js"></script>
+    <style>
+        video#videoPlayer {
+            width: 640px;
+            height: 360px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="loadingPanel">
+        <p>Загрузка.</p>
+    </div>
+    <div id="videoListPanel" style="display: none">
+        <p>Выберите видео для воспроизведения:</p>
+        <ul id="videoList"></ul>
+    </div>
+    <div id="videoPlayerPanel" style="display: none">
+        <video id="videoPlayer" controls autoplay></video>
+        <p>Нажать играть, если видео не авто-запустилось.</p>
+        <p>Обновить страницу для возврата к каталогу выбора видео.</p>
+    </div>
+    <div>
+    </div>
+
+    <script type="text/javascript">
+        $(function () {
+            var $loadingPanel = $("#loadingPanel");
+            var $videoListPanel = $("#videoListPanel");
+            var $videoList = $("#videoList");
+            var $videoPlayerPanel = $("#videoPlayerPanel");
+            var $videoPlayer = $("#videoPlayer");
+
+    
+            var isSafariDetected = false;
+            var fairPlayCertificate = null;
+            var fairPlayCertificateUrl = "https://vtb.axinom.com/FPScert/fairplay.cer";
+
+           
+            if (typeof WebKitMediaKeys === "function" && WebKitMediaKeys.isTypeSupported("com.apple.fps.1_0", "video/mp4"))
+            {
+                console.log("FairPlay support detected.");
+                isSafariDetected = true;
+            }
+
+       
+            function playVideo(video) {
+                $videoListPanel.hide();
+                $loadingPanel.show();
+
+                console.log("Requesting license token.");
+
+
+                $.getJSON("/api/authorization/" + encodeURIComponent(video.name))
+                .done(function(licenseToken) {
+                  
+                    console.log("Starting Shaka player playback with license token: " + licenseToken)
+
+                    shaka.log.setLevel(shaka.log.Level.INFO);
+
+                    shaka.polyfill.installAll();
+
+                    if (shaka.Player.isBrowserSupported()) {
+
+                        var player = new shaka.Player($videoPlayer[0]);
+
+                        window.player = player;
+
+                        player.addEventListener('error', onErrorEvent);
+
+                        player.configure({
+                            drm: {
+                                servers: {
+                                    'com.widevine.alpha': 'https://drm-widevine-licensing.axtest.net/AcquireLicense',
+                                    'com.microsoft.playready': 'https://drm-playready-licensing.axtest.net/AcquireLicense',
+                                    'com.apple.fps.1_0': 'https://drm-fairplay-licensing.axtest.net/AcquireLicense'
+                                },
+                                
+                                fairPlayTransform: false
+                            }
+                        });
+
+                        if (isSafariDetected === true) {
+                            player.configure('drm.advanced.com\\.apple\\.fps\\.1_0.serverCertificate', fairPlayCertificate);
+
+                            player.configure('drm.initDataTransform', function(initData) {
+                                console.log("FairPlay InitData transform: trying to extact Asset ID from InitData.")
+                                
+                                
+                                try {
+                                   
+                                    let assetIdArray = initData.slice(16, initData.length);
+                                    assetIdArray = new Uint16Array(assetIdArray.buffer);
+                                    let assetId = String.fromCharCode.apply(null, assetIdArray);
+                                    
+                                    console.log("Asset ID: " + assetId);
+                                    return shaka.util.FairPlayUtils.initDataTransform(initData, assetId, fairPlayCertificate);
+
+                                } catch {
+                                    
+                                    
+                                    return shaka.util.FairPlayUtils.initDataTransform(initData, null, fairPlayCertificate);
+                                }
+                            });
+                        }
+						
+                        player.getNetworkingEngine().registerRequestFilter(function(type, request) {
+                            if (type == shaka.net.NetworkingEngine.RequestType.LICENSE) {
+                               
+                                request.headers['X-AxDRM-Message'] = licenseToken;
+                            }
+                            
+                        });
+
+                        player.load(video.url).then(function() {
+                         
+                            console.log('The video has now been loaded!');
+                        }).catch(onError);  
+                    } else {
+                       
+                        console.error('Browser not supported!');
+                    }
+
+                    $loadingPanel.hide();
+                    $videoPlayerPanel.show();
+                })
+                .fail(function() {
+                    console.log("ERROR - failed to get license token.");
+                });
+            }
+
+            $.getJSON("/api/catalog/videos")
+            .done(function(videos) {
+                console.log("Server provided " + videos.length + " videos.");
+
+                $.each(videos, function(index, video) {
+                   
+                    if ((!video.tags && isSafariDetected) || (video.tags && video.tags.filter(function(tag) {
+                        tag = tag.toLowerCase();
+                        if (isSafariDetected && tag === "fairplay") {
+                            return true;
+                        } else if (!isSafariDetected && tag !== "fairplay") {
+                            return true;
+                        } else {
+                            return false;
+                        }
+                    }).length == 0)) {
+                        console.log("Video \"" + video.name + "\" is not supported on current platform, hiding it...");
+                        return;
+                    }
+                    
+                    console.log("Video \"" + video.name + "\" is at URL " + video.url);
+
+                    var link = $("<a href=\"#\">");
+                    link.text(video.name);
+                    var listItem = $("<li>").append(link);
+                    $videoList.append(listItem);
+                    link.click(function () {
+                        playVideo(video);
+                        return false;
+                    });
+                });
+
+                console.log("Loading complete.");
+
+                if (isSafariDetected) {
+                    loadFairPlayCertificate();
+                } else {
+                    $loadingPanel.hide();
+                    $videoListPanel.show();
+                }
+            })
+            .fail(function() {
+                console.log("API call to get video catalog failed!");
+            });
+        
+            function onErrorEvent(event) {
+                onError(event.detail);
+            }
+
+            function onError(error) {
+              
+                if (error.code === 6006 && isSafariDetected) {
+                    console.warn('Error code', error.code, 'object', error);
+                    console.warn('This error can occur due to a non-fatal FairPlay related bug in Shaka Player. The playback should still work.')
+                } else {
+                    console.error('Error code', error.code, 'object', error);
+                }
+            }
+
+            function loadFairPlayCertificate() {
+                console.log("Requesting FairPlay certificate from " + fairPlayCertificateUrl)
+                var request = new XMLHttpRequest();
+                request.responseType = 'arraybuffer';
+                request.addEventListener('load', onFairPlayCertificateLoaded, false);
+                request.addEventListener('error', onFairPlayCertificateError, false);
+                request.open('GET', fairPlayCertificateUrl, true);
+                request.setRequestHeader('Pragma', 'Cache-Control: no-cache');
+                request.setRequestHeader("Cache-Control", "max-age=0");
+                request.send();
+            }
+        
+            function onFairPlayCertificateLoaded(event) {
+                console.log("FairPlay certificate received.");
+                var request = event.target;
+                fairPlayCertificate = new Uint8Array(request.response);
+                
+                $loadingPanel.hide();
+                $videoListPanel.show();
+            }
+            
+            function onFairPlayCertificateError(event) {
+                console.error('FairPlay certificate request failed.');
+            } 
+        
+        });
+    </script>
+</body>
+
+</html>
